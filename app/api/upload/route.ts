@@ -22,22 +22,33 @@ function clampQuality(value: number) {
 }
 
 async function convertHeic(buffer: Buffer, format: OutputFormat, quality: number) {
-  if (format === 'jpg' || format === 'png') {
-    const converted = await convert({
+  console.log(`convertHeic called with format ${format}, quality ${quality}`);
+  try {
+    if (format === 'jpg' || format === 'png') {
+      console.log('Converting directly to JPEG/PNG');
+      const converted = await convert({
+        buffer,
+        format: format === 'jpg' ? 'JPEG' : 'PNG',
+        quality: quality / 100,
+      });
+      console.log('Direct conversion done');
+      return Buffer.from(converted);
+    }
+
+    console.log('Converting to intermediate PNG');
+    const intermediatePng = await convert({
       buffer,
-      format: format === 'jpg' ? 'JPEG' : 'PNG',
-      quality: quality / 100,
+      format: 'PNG',
+      quality: 1,
     });
-    return Buffer.from(converted);
+    console.log('Intermediate PNG done, now to WebP');
+    const result = await sharp(Buffer.from(intermediatePng)).webp({ quality }).toBuffer();
+    console.log('WebP conversion done');
+    return result;
+  } catch (error) {
+    console.error('Error in convertHeic:', error);
+    throw error;
   }
-
-  const intermediatePng = await convert({
-    buffer,
-    format: 'PNG',
-    quality: 1,
-  });
-
-  return sharp(Buffer.from(intermediatePng)).webp({ quality }).toBuffer();
 }
 
 export async function POST(request: Request) {
