@@ -66,11 +66,14 @@ export async function POST(request: Request) {
 
     const stream = new ReadableStream({
       async start(controller) {
-        const write = async (payload: object) => {
-          controller.enqueue(encoder.encode(`${JSON.stringify(payload)}\n`));
-        };
+        console.log('Stream start called');
+        try {
+          const write = async (payload: object) => {
+            controller.enqueue(encoder.encode(`${JSON.stringify(payload)}\n`));
+          };
 
-        await write({ type: 'start', total: files.length });
+          await write({ type: 'start', total: files.length });
+          console.log('Start written');
 
         for (let index = 0; index < files.length; index += 1) {
           const file = files[index];
@@ -141,6 +144,10 @@ export async function POST(request: Request) {
         });
 
         controller.close();
+        } catch (error) {
+          console.error('Error in stream start:', error);
+          controller.error(error);
+        }
       },
       cancel() {
         /* no-op */
