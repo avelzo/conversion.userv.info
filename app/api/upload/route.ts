@@ -1,11 +1,12 @@
 import { NextResponse } from 'next/server';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import sharp from 'sharp';
 import convert from 'heic-convert';
+import sharp from 'sharp';
 import {
   createSessionFolders,
   getMimeType,
+  purgeOldSessions,
   replaceExt,
   sanitizeFilename,
   type ConvertedFileRecord,
@@ -56,66 +57,93 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Format de sortie invalide.' }, { status: 400 });
     }
 
+    await purgeOldSessions(12 * 60 * 60 * 1000);
     const { sessionId: resolvedSessionId, originalDir, convertedDir } = await createSessionFolders(sessionId);
     const convertedFiles: ConvertedFileRecord[] = [];
     const errors: { filename: string; error: string }[] = [];
 
-    for (const file of files) {
-      const originalName = sanitizeFilename(file.name || `image-${Date.now()}.heic`);
-      const isHeic = /\.(heic|heif)$/i.test(originalName) || ['image/heic', 'image/heif'].includes(file.type);
+    const encoder = new TextEncoder();
 
-      if (!isHeic) {
-        errors.push({ filename: originalName, error: 'Format non supporté. Utilise un fichier .heic ou .heif.' });
-        continue;
-      }
+    const stream = new ReadableStream({
+      async start(controller) {
+        const write = async (payload: object) => {
+          controller.enqueue(encoder.encode(`${JSON.stringify(payload)}\n`));
+        };
 
-      try {
-        const arrayBuffer = await file.arrayBuffer();
-        const inputBuffer = Buffer.from(arrayBuffer);
-        const originalPath = path.join(originalDir, originalName);
-        await fs.writeFile(originalPath, inputBuffer);
+        await write({ type: 'start', total: files.length });
 
-        const convertedName = replaceExt(originalName, format);
-        const convertedPath = path.join(convertedDir, convertedName);
-        const outputBuffer = await convertHeic(inputBuffer, format, quality);
-        await fs.writeFile(convertedPath, outputBuffer);
+        for (let index = 0; index < files.length; index += 1) {
+          const file = files[index];
+          const originalName = sanitizeFilename(file.name || `image-${Date.now()}.heic`);
+          const isHeic = /\.(heic|heif)$/i.test(originalName) || ['image/heic', 'image/heif'].includes(file.type);
 
-        convertedFiles.push({
-          originalName,
-          convertedName,
-          originalPath,
-          convertedPath,
-          mimeType: getMimeType(format),
-          format,
-          size: outputBuffer.length,
-          createdAt: new Date().toISOString(),
+          if (!isHeic) {
+            errors.push({ filename: originalName, error: 'Format non supporté. Utilise un fichier .heic ou .heif.' });
+            await write({ type: 'progress', index: index + 1, total: files.length, filename: originalName });
+            continue;
+          }
+
+          try {
+            const arrayBuffer = await file.arrayBuffer();
+            const inputBuffer = Buffer.from(arrayBuffer);
+            const originalPath = path.join(originalDir, originalName);
+            await fs.writeFile(originalPath, inputBuffer);
+
+            const convertedName = replaceExt(originalName, format);
+            const convertedPath = path.join(convertedDir, convertedName);
+            const outputBuffer = await convertHeic(inputBuffer, format, quality);
+            await fs.writeFile(convertedPath, outputBuffer);
+
+            convertedFiles.push({
+              originalName,
+              convertedName,
+              originalPath,
+              convertedPath,
+              mimeType: getMimeType(format),
+              format,
+              size: outputBuffer.length,
+              createdAt: new Date().toISOString(),
+            });
+            await write({ type: 'progress', index: index + 1, total: files.length, filename: originalName });
+          } catch (error) {
+            const message = error instanceof Error ? error.message : 'Conversion impossible';
+            errors.push({ filename: originalName, error: message });
+            await write({ type: 'progress', index: index + 1, total: files.length, filename: originalName });
+          }
+        }
+
+        await write({
+          type: 'done',
+          sessionId: resolvedSessionId,
+          files: convertedFiles.map((item) => ({
+            originalName: item.originalName,
+            convertedName: item.convertedName,
+            size: item.size,
+            mimeType: item.mimeType,
+            downloadUrl: `/api/download/${resolvedSessionId}?file=${encodeURIComponent(item.convertedName)}`,
+          })),
+          errors,
         });
-      } catch (error) {
-        const message = error instanceof Error ? error.message : 'Conversion impossible';
-        errors.push({ filename: originalName, error: message });
-      }
-    }
 
-    await writeManifest(resolvedSessionId, {
-      sessionId: resolvedSessionId,
-      createdAt: new Date().toISOString(),
-      format,
-      quality,
-      files: convertedFiles,
+        await writeManifest(resolvedSessionId, {
+          sessionId: resolvedSessionId,
+          createdAt: new Date().toISOString(),
+          format,
+          quality,
+          files: convertedFiles,
+        });
+
+        controller.close();
+      },
+      cancel() {
+        /* no-op */
+      },
     });
 
-    return NextResponse.json({
-      sessionId: resolvedSessionId,
-      format,
-      quality,
-      files: convertedFiles.map((item) => ({
-        originalName: item.originalName,
-        convertedName: item.convertedName,
-        size: item.size,
-        mimeType: item.mimeType,
-        downloadUrl: `/api/download/${resolvedSessionId}?file=${encodeURIComponent(item.convertedName)}`,
-      })),
-      errors,
+    return new Response(stream, {
+      headers: {
+        'Content-Type': 'application/x-ndjson',
+      },
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Erreur serveur.';

@@ -27,11 +27,12 @@ export async function GET(
 
     const filePath = path.join(UPLOADS_ROOT, sessionId, 'converted', match.convertedName);
     const data = await fs.readFile(filePath);
+    const inline = ['1', 'true'].includes(searchParams.get('inline') ?? '');
 
     return new NextResponse(new Uint8Array(data), {
       headers: {
         'Content-Type': match.mimeType,
-        'Content-Disposition': `attachment; filename="${match.convertedName}"`,
+        'Content-Disposition': `${inline ? 'inline' : 'attachment'}; filename="${match.convertedName}"`,
         'Cache-Control': 'no-store',
       },
     });

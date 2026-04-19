@@ -62,6 +62,26 @@ export async function writeManifest(sessionId: string, manifest: SessionManifest
   await fs.writeFile(path.join(sessionDir, MANIFEST_FILE), JSON.stringify(manifest, null, 2), 'utf-8');
 }
 
+export async function purgeOldSessions(maxAgeMs: number) {
+  const entries = await fs.readdir(UPLOADS_ROOT, { withFileTypes: true });
+  const now = Date.now();
+
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const sessionDir = path.join(UPLOADS_ROOT, entry.name);
+
+    try {
+      const stats = await fs.stat(sessionDir);
+      const age = now - Math.max(stats.mtimeMs, stats.ctimeMs);
+      if (age > maxAgeMs) {
+        await fs.rm(sessionDir, { recursive: true, force: true });
+      }
+    } catch {
+      // ignore permission or race conditions
+    }
+  }
+}
+
 export async function readManifest(sessionId: string): Promise<SessionManifest> {
   const manifestPath = path.join(UPLOADS_ROOT, sessionId, MANIFEST_FILE);
   const raw = await fs.readFile(manifestPath, 'utf-8');

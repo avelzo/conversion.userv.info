@@ -12,19 +12,16 @@ type ConvertedItem = {
   downloadUrl: string;
 };
 
-type ApiResponse = {
-  sessionId: string;
-  format: OutputFormat;
-  quality: number;
-  files: ConvertedItem[];
-  errors: { filename: string; error: string }[];
-  error?: string;
-};
-
 type UploadItem = {
   file: File;
   id: string;
 };
+
+type UploadProgressEvent =
+  | { type: 'start'; total: number }
+  | { type: 'progress'; index: number; total: number; filename: string }
+  | { type: 'done'; sessionId: string; files: ConvertedItem[]; errors: { filename: string; error: string }[] }
+  | { type: 'error'; error: string };
 
 function formatBytes(bytes: number) {
   if (bytes < 1024) return `${bytes} B`;
@@ -48,11 +45,18 @@ export default function ConverterApp() {
   const [converted, setConverted] = useState<ConvertedItem[]>([]);
   const [errors, setErrors] = useState<{ filename: string; error: string }[]>([]);
   const [loading, setLoading] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [serverError, setServerError] = useState<string | null>(null);
 
   const totalSize = useMemo(
     () => files.reduce((acc, item) => acc + item.file.size, 0),
     [files]
+  );
+
+  const convertedMap = useMemo(
+    () => new Map(converted.map((item) => [item.originalName, item] as const)),
+    [converted]
   );
 
   function addFiles(selected: FileList | File[]) {
@@ -76,6 +80,9 @@ export default function ConverterApp() {
     setLoading(true);
     setServerError(null);
     setErrors([]);
+    setProgress(0);
+    setStatusMessage('Préparation de l’envoi…');
+    setConverted([]);
 
     try {
       const formData = new FormData();
@@ -84,30 +91,92 @@ export default function ConverterApp() {
       formData.append('quality', String(quality));
       if (sessionId) formData.append('sessionId', sessionId);
 
-      const response = await fetch('/api/upload', {
-        method: 'POST',
-        body: formData,
+      await new Promise<void>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', '/api/upload');
+        xhr.responseType = 'text';
+
+        let lastProcessedLength = 0;
+
+        const parseStream = () => {
+          const responseText = xhr.responseText;
+          const chunk = responseText.slice(lastProcessedLength);
+          lastProcessedLength = responseText.length;
+
+          for (const rawLine of chunk.split('\n')) {
+            const line = rawLine.trim();
+            if (!line) continue;
+            try {
+              const event = JSON.parse(line) as UploadProgressEvent;
+              if (event.type === 'start') {
+                setStatusMessage(`Conversion de ${event.total} fichier(s)…`);
+              }
+              if (event.type === 'progress') {
+                setProgress(Math.round(30 + (event.index / event.total) * 60));
+                setStatusMessage(`Conversion de ${event.filename} (${event.index}/${event.total})`);
+              }
+              if (event.type === 'done') {
+                setSessionId(event.sessionId);
+                setConverted(event.files);
+                setErrors(event.errors || []);
+                setProgress(100);
+                setStatusMessage('Conversion terminée');
+              }
+              if (event.type === 'error') {
+                setServerError(event.error);
+              }
+            } catch {
+              // ignore malformed partial lines
+            }
+          }
+        };
+
+        xhr.upload.onprogress = (event) => {
+          if (event.lengthComputable) {
+            setProgress(Math.round((event.loaded / event.total) * 20));
+            setStatusMessage('Envoi des fichiers…');
+          } else {
+            setProgress(15);
+          }
+        };
+
+        xhr.onprogress = parseStream;
+        xhr.onreadystatechange = () => {
+          if (xhr.readyState === XMLHttpRequest.DONE) {
+            parseStream();
+            if (xhr.status >= 400) {
+              try {
+                const lastLine = xhr.responseText.trim().split('\n').pop();
+                const parsed = lastLine ? JSON.parse(lastLine) : null;
+                const errorMessage = parsed?.error ?? 'Erreur serveur.';
+                setServerError(errorMessage);
+              } catch {
+                setServerError('Erreur serveur.');
+              }
+            }
+          }
+        };
+
+        xhr.onerror = () => reject(new Error('Erreur de connexion lors de la conversion.'));
+        xhr.onloadend = () => resolve();
+        xhr.send(formData);
       });
-
-      const data = (await response.json()) as ApiResponse;
-
-      if (!response.ok) {
-        throw new Error(data.error || 'Conversion impossible.');
-      }
-
-      setSessionId(data.sessionId);
-      setConverted(data.files);
-      setErrors(data.errors || []);
     } catch (error) {
       setServerError(error instanceof Error ? error.message : 'Erreur inconnue.');
+      setProgress(0);
+      setStatusMessage(null);
     } finally {
       setLoading(false);
+      if (!serverError && progress !== 100) {
+        setProgress(100);
+      }
     }
   }
 
   function handleDrop(event: React.DragEvent<HTMLDivElement>) {
     event.preventDefault();
     setIsDragging(false);
+    if (loading) return;
     if (event.dataTransfer.files?.length) {
       addFiles(event.dataTransfer.files);
     }
@@ -123,6 +192,8 @@ export default function ConverterApp() {
     setErrors([]);
     setServerError(null);
     setSessionId(null);
+    setProgress(0);
+    setStatusMessage(null);
     if (inputRef.current) inputRef.current.value = '';
   }
 
@@ -144,16 +215,16 @@ export default function ConverterApp() {
             className={`dropzone ${isDragging ? 'active' : ''}`}
             onDragOver={(e) => {
               e.preventDefault();
-              setIsDragging(true);
+              if (!loading) setIsDragging(true);
             }}
             onDragLeave={() => setIsDragging(false)}
             onDrop={handleDrop}
           >
             <div className="actions">
-              <button className="btn btn-primary" onClick={() => inputRef.current?.click()}>
+              <button className="btn btn-primary" onClick={() => inputRef.current?.click()} disabled={loading}>
                 Sélectionner des images HEIC
               </button>
-              <button className="btn btn-secondary" onClick={resetAll} disabled={!files.length && !converted.length}>
+              <button className="btn btn-secondary" onClick={resetAll} disabled={loading || (!files.length && !converted.length)}>
                 Réinitialiser
               </button>
             </div>
@@ -167,6 +238,7 @@ export default function ConverterApp() {
               onChange={(e) => {
                 if (e.target.files) addFiles(e.target.files);
               }}
+              disabled={loading}
             />
 
             <p className="helper" style={{ marginTop: 16 }}>
@@ -175,20 +247,44 @@ export default function ConverterApp() {
           </div>
 
           <div className="list">
-            {files.map((item) => (
-              <div key={item.id} className="item">
-                <div>
-                  <strong>{item.file.name}</strong>
-                  <small>{formatBytes(item.file.size)}</small>
+            {files.map((item) => {
+              const convertedItem = convertedMap.get(item.file.name);
+              const thumbnailUrl =
+                convertedItem && sessionId
+                  ? `/api/download/${sessionId}?file=${encodeURIComponent(convertedItem.convertedName)}&inline=1`
+                  : undefined;
+
+              return (
+                <div key={item.id} className="item" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+                  <div style={{ flex: 1 }}>
+                    <strong>{item.file.name}</strong>
+                    <small>{formatBytes(item.file.size)}</small>
+                  </div>
+
+                  {convertedItem && (
+                    <img
+                      src={thumbnailUrl}
+                      alt={`Aperçu de ${convertedItem.convertedName}`}
+                      style={{ width: 60, height: 60, objectFit: 'cover', borderRadius: 8, border: '1px solid #e5e7eb' }}
+                    />
+                  )}
+
+                  <div className="actions" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span className={`status ${convertedItem ? 'done' : 'ready'}`}>
+                      {convertedItem ? 'Terminé' : 'Prêt'}
+                    </span>
+                    {convertedItem ? (
+                      <a className="btn btn-primary" href={convertedItem.downloadUrl} download>
+                        Télécharger
+                      </a>
+                    ) : null}
+                    <button className="btn btn-secondary" onClick={() => removeFile(item.id)} disabled={loading}>
+                      Retirer
+                    </button>
+                  </div>
                 </div>
-                <div className="actions" style={{ justifyContent: 'flex-end' }}>
-                  <span className="status ready">Prêt</span>
-                  <button className="btn btn-secondary" onClick={() => removeFile(item.id)}>
-                    Retirer
-                  </button>
-                </div>
-              </div>
-            ))}
+              );
+            })}
             {!files.length && <p className="helper">Aucun fichier chargé pour le moment.</p>}
           </div>
         </section>
@@ -204,6 +300,7 @@ export default function ConverterApp() {
                   className="select"
                   value={format}
                   onChange={(e) => setFormat(e.target.value as OutputFormat)}
+                  disabled={loading}
                 >
                   <option value="jpg">JPG</option>
                   <option value="png">PNG</option>
@@ -221,7 +318,7 @@ export default function ConverterApp() {
                   max={100}
                   value={quality}
                   onChange={(e) => setQuality(Number(e.target.value))}
-                  disabled={format === 'png'}
+                  disabled={loading || format === 'png'}
                 />
                 <p className="helper">
                   Le réglage est surtout utile pour JPG et WEBP. Pour PNG, la compression reste sans perte.
@@ -229,7 +326,7 @@ export default function ConverterApp() {
               </div>
             </div>
 
-            <div className="actions" style={{ marginTop: 20 }}>
+            <div className="actions" style={{ marginTop: 20, flexDirection: 'column', gap: 12 }}>
               <button className="btn btn-primary" onClick={handleConvert} disabled={!files.length || loading}>
                 {loading ? 'Conversion en cours…' : 'Convertir'}
               </button>
@@ -242,6 +339,21 @@ export default function ConverterApp() {
                 Télécharger tout en ZIP
               </a>
             </div>
+
+            {progress > 0 && (
+              <div style={{ marginTop: 16 }}>
+                <label htmlFor="conversion-progress" className="helper" style={{ display: 'block', marginBottom: 8 }}>
+                  {statusMessage ?? 'Progression de la conversion'}
+                </label>
+                <progress id="conversion-progress" className="progress" max={100} value={progress} />
+                <div style={{ marginTop: 8, display: 'flex', justifyContent: 'space-between' }}>
+                  <span>{progress}%</span>
+                  <span>{loading ? 'Conversion en cours' : 'Prêt'}</span>
+                </div>
+              </div>
+            )}
+
+            {serverError && <p className="error">{serverError}</p>}
 
             <p className="footer-note">
               Dossier serveur : <code>uploads/{sessionId ?? 'future-session-id'}</code>
@@ -259,46 +371,26 @@ export default function ConverterApp() {
                 Taille totale
                 <strong>{formatBytes(totalSize)}</strong>
               </div>
-              <div className="stat">
-                Convertis
-                <strong>{converted.length}</strong>
-              </div>
             </div>
 
-            {serverError && <p className="status error" style={{ marginTop: 16 }}>{serverError}</p>}
-            {!!errors.length && (
+            {errors.length > 0 && (
               <div style={{ marginTop: 16 }}>
-                {errors.map((entry) => (
-                  <p key={`${entry.filename}-${entry.error}`} className="helper" style={{ color: '#fecaca' }}>
-                    {entry.filename} : {entry.error}
-                  </p>
-                ))}
+                <div className="section-title">Erreurs</div>
+                <div className="list">
+                  {errors.map((errorItem) => (
+                    <div key={errorItem.filename} className="item">
+                      <div>
+                        <strong>{errorItem.filename}</strong>
+                        <small>{errorItem.error}</small>
+                      </div>
+                    </div>
+                  ))}
+                </div>
               </div>
             )}
           </section>
         </aside>
       </div>
-
-      <section className="card panel" style={{ marginTop: 20 }}>
-        <div className="section-title">Fichiers convertis</div>
-        <div className="list">
-          {converted.map((item) => (
-            <div key={item.downloadUrl} className="item">
-              <div>
-                <strong>{item.convertedName}</strong>
-                <small>Source : {item.originalName} • {formatBytes(item.size)}</small>
-              </div>
-              <div className="actions" style={{ justifyContent: 'flex-end' }}>
-                <span className="status done">Terminé</span>
-                <a className="btn btn-secondary" href={item.downloadUrl}>
-                  Télécharger
-                </a>
-              </div>
-            </div>
-          ))}
-          {!converted.length && <p className="helper">Les images converties apparaîtront ici après traitement.</p>}
-        </div>
-      </section>
     </main>
   );
 }
