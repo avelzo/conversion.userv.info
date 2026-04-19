@@ -39,4 +39,3 @@ uploads/
 
 - Le stockage est **local au serveur** qui héberge l'application.
 - Si tu veux écrire directement dans un dossier arbitraire du poste client via le navigateur, il faut passer par des APIs navigateur spécifiques et ce n'est pas fiable comme comportement universel. Cette version suit le modèle standard : upload vers l'app self-hostée, stockage local serveur, puis download.
-# conversion.userv.info
