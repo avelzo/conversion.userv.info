@@ -48,6 +48,7 @@ export default function ConverterApp() {
   const [progress, setProgress] = useState(0);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [serverError, setServerError] = useState<string | null>(null);
+  const [showCompletionModal, setShowCompletionModal] = useState(false);
 
   const totalSize = useMemo(
     () => files.reduce((acc, item) => acc + item.file.size, 0),
@@ -121,6 +122,7 @@ export default function ConverterApp() {
                 setErrors(event.errors || []);
                 setProgress(100);
                 setStatusMessage('Conversion terminée');
+                setShowCompletionModal(true);
               }
               if (event.type === 'error') {
                 setServerError(event.error);
@@ -194,6 +196,7 @@ export default function ConverterApp() {
     setSessionId(null);
     setProgress(0);
     setStatusMessage(null);
+    setShowCompletionModal(false);
     if (inputRef.current) inputRef.current.value = '';
   }
 
@@ -270,14 +273,15 @@ export default function ConverterApp() {
                   )}
 
                   <div className="actions" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <span className={`status ${convertedItem ? 'done' : 'ready'}`}>
-                      {convertedItem ? 'Terminé' : 'Prêt'}
-                    </span>
                     {convertedItem ? (
                       <a className="btn btn-primary" href={convertedItem.downloadUrl} download>
                         Télécharger
                       </a>
-                    ) : null}
+                    ) : 
+                      <span className={`status ${convertedItem ? 'done' : 'ready'}`}>
+                        {`Prêt`}
+                      </span>
+                    }
                     <button className="btn btn-secondary" onClick={() => removeFile(item.id)} disabled={loading}>
                       Retirer
                     </button>
@@ -391,6 +395,47 @@ export default function ConverterApp() {
           </section>
         </aside>
       </div>
+
+      {showCompletionModal && (
+        <div
+          style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            backgroundColor: 'rgba(0, 0, 0, 0.5)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 1000,
+          }}
+          onClick={() => setShowCompletionModal(false)}
+        >
+          <div
+            className="card panel"
+            style={{
+              maxWidth: 400,
+              margin: 20,
+              textAlign: 'center',
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 style={{ marginBottom: 16, color: '#10b981' }}>✅ Conversion terminée !</h2>
+            <p style={{ marginBottom: 24 }}>
+              Toutes vos images HEIC ont été converties avec succès.
+              Vous pouvez maintenant les télécharger individuellement ou en ZIP.
+            </p>
+            <button
+              className="btn btn-primary"
+              onClick={() => setShowCompletionModal(false)}
+              style={{ width: '100%' }}
+            >
+              OK
+            </button>
+          </div>
+        </div>
+      )}
     </main>
   );
 }
