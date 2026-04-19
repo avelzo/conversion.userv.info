@@ -84,15 +84,21 @@ export async function POST(request: Request) {
           }
 
           try {
+            console.log(`Starting conversion for ${originalName}`);
             const arrayBuffer = await file.arrayBuffer();
             const inputBuffer = Buffer.from(arrayBuffer);
+            console.log(`Buffer size: ${inputBuffer.length}`);
             const originalPath = path.join(originalDir, originalName);
             await fs.writeFile(originalPath, inputBuffer);
+            console.log(`Original file written: ${originalPath}`);
 
             const convertedName = replaceExt(originalName, format);
             const convertedPath = path.join(convertedDir, convertedName);
+            console.log(`Converting to ${format} with quality ${quality}`);
             const outputBuffer = await convertHeic(inputBuffer, format, quality);
+            console.log(`Conversion done, output size: ${outputBuffer.length}`);
             await fs.writeFile(convertedPath, outputBuffer);
+            console.log(`Converted file written: ${convertedPath}`);
 
             convertedFiles.push({
               originalName,
@@ -106,6 +112,7 @@ export async function POST(request: Request) {
             });
             await write({ type: 'progress', index: index + 1, total: files.length, filename: originalName });
           } catch (error) {
+            console.error(`Error converting ${originalName}:`, error);
             const message = error instanceof Error ? error.message : 'Conversion impossible';
             errors.push({ filename: originalName, error: message });
             await write({ type: 'progress', index: index + 1, total: files.length, filename: originalName });
