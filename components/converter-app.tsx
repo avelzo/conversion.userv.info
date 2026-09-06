@@ -200,7 +200,7 @@ export default function ConverterApp() {
 
   return (
     <main className="container">
-      <div className="badge">HEIC → JPG / PNG / WEBP • Sauvegarde locale dans uploads/session-id</div>
+      <div className="badge">HEIC → JPG / PNG / WEBP • Stockage temporaire privé</div>
 
       <div style={{ marginTop: 20 }} className="grid grid-2">
         <section className="card panel">
@@ -209,7 +209,7 @@ export default function ConverterApp() {
             Dépose un ou plusieurs fichiers HEIC/HEIF, choisis le format de sortie,
             puis télécharge chaque image convertie séparément ou un ZIP complet.
             Les originaux et les conversions sont enregistrés sur le disque local du serveur,
-            dans <code>uploads/&lt;sessionId&gt;</code>.
+            dans un espace temporaire privé du serveur.
           </p>
 
           <div
@@ -358,7 +358,7 @@ export default function ConverterApp() {
             {serverError && <p className="error">{serverError}</p>}
 
             <p className="footer-note">
-              Dossier serveur : <code>uploads/{sessionId ?? 'future-session-id'}</code>
+              Session temporaire : <code>{sessionId ?? 'future-session-id'}</code>
             </p>
           </section>
 

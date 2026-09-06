@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 
-export const UPLOADS_ROOT = path.join(process.cwd(), 'uploads');
+export const UPLOADS_ROOT = '/var/tmp/conversion.userv.info';
 const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export type OutputFormat = 'jpg' | 'png' | 'webp';
@@ -27,7 +27,7 @@ export type SessionManifest = {
 };
 
 export async function ensureDir(dirPath: string) {
-  await fs.mkdir(dirPath, { recursive: true });
+  await fs.mkdir(dirPath, { recursive: true, mode: 0o700 });
 }
 
 export function isValidSessionId(sessionId: string) {
@@ -91,7 +91,10 @@ export async function writeManifest(sessionId: string, manifest: SessionManifest
   await ensureDir(sessionDir);
   const manifestPath = resolveWithin(sessionDir, MANIFEST_FILE);
   const temporaryPath = resolveWithin(sessionDir, `${MANIFEST_FILE}.tmp`);
-  await fs.writeFile(temporaryPath, JSON.stringify(manifest, null, 2), 'utf-8');
+  await fs.writeFile(temporaryPath, JSON.stringify(manifest, null, 2), {
+    encoding: 'utf-8',
+    mode: 0o600,
+  });
   await fs.rename(temporaryPath, manifestPath);
 }
 
@@ -99,9 +102,10 @@ export async function purgeOldSessions(maxAgeMs: number) {
   await ensureDir(UPLOADS_ROOT);
   const entries = await fs.readdir(UPLOADS_ROOT, { withFileTypes: true });
   const now = Date.now();
+  let purgedSessions = 0;
 
   for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
+    if (!entry.isDirectory() || !isValidSessionId(entry.name)) continue;
     const sessionDir = path.join(UPLOADS_ROOT, entry.name);
 
     try {
@@ -109,11 +113,14 @@ export async function purgeOldSessions(maxAgeMs: number) {
       const age = now - Math.max(stats.mtimeMs, stats.ctimeMs);
       if (age > maxAgeMs) {
         await fs.rm(sessionDir, { recursive: true, force: true });
+        purgedSessions += 1;
       }
     } catch {
       // ignore permission or race conditions
     }
   }
+
+  return purgedSessions;
 }
 
 export async function readManifest(sessionId: string): Promise<SessionManifest> {

@@ -168,7 +168,7 @@ export async function POST(request: Request) {
             await validateHeic(inputBuffer);
 
             originalPath = resolveWithin(originalDir, originalName);
-            await fs.writeFile(originalPath, inputBuffer, { flag: 'wx' });
+            await fs.writeFile(originalPath, inputBuffer, { flag: 'wx', mode: 0o600 });
 
             const convertedName = replaceExt(originalName, outputFormat);
             convertedPath = resolveWithin(convertedDir, convertedName);
@@ -181,7 +181,7 @@ export async function POST(request: Request) {
               throw new Error('La taille totale des conversions dépasse la limite de 250 Mio.');
             }
 
-            await fs.writeFile(convertedPath, outputBuffer, { flag: 'wx' });
+            await fs.writeFile(convertedPath, outputBuffer, { flag: 'wx', mode: 0o600 });
             totalOutputSize += outputBuffer.length;
             convertedFiles.push({
               originalName,

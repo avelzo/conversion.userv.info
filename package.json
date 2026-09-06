@@ -7,6 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
+    "cleanup": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --experimental-strip-types scripts/purge-old-sessions.mts",
     "test": "node --experimental-strip-types --test tests/*.test.ts"
   },
   "dependencies": {
