@@ -14,6 +14,15 @@ Application Next.js simple pour convertir des images **HEIC/HEIF** vers **JPG**,
 - Téléchargement de toutes les conversions dans un ZIP
 - Interface simple avec drag & drop
 
+## Sécurité et limites
+
+- Les identifiants de session sont des UUID v4 générés exclusivement par le serveur.
+- Le contenu HEIC/HEIF est vérifié (signature ISO BMFF, codec et dimensions), indépendamment du MIME envoyé par le navigateur.
+- Limites : 20 fichiers, 25 Mio par fichier, 100 Mio par requête et 40 mégapixels par image.
+- Une conversion produite est limitée à 100 Mio, et l'ensemble des sorties d'une requête à 250 Mio.
+- Au plus deux requêtes de conversion sont traitées simultanément par processus serveur.
+- Les fichiers partiels sont supprimés en cas d'échec et les sessions âgées de plus de 12 heures sont purgées lors d'un nouvel upload.
+
 ## Installation
 
 ```bash

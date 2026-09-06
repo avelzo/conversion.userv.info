@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import fs from 'node:fs/promises';
-import path from 'node:path';
-import { readManifest, UPLOADS_ROOT } from '@/lib/files';
+import { constants } from 'node:fs';
+import { getMimeType, getSessionDir, isValidSessionId, readManifest, resolveWithin } from '@/lib/files';
 
 export const runtime = 'nodejs';
 
@@ -11,6 +11,10 @@ export async function GET(
 ) {
   try {
     const { sessionId } = await params;
+    if (!isValidSessionId(sessionId)) {
+      return NextResponse.json({ error: 'Session invalide.' }, { status: 400 });
+    }
+
     const { searchParams } = new URL(request.url);
     const file = searchParams.get('file');
 
@@ -25,15 +29,18 @@ export async function GET(
       return NextResponse.json({ error: 'Fichier introuvable.' }, { status: 404 });
     }
 
-    const filePath = path.join(UPLOADS_ROOT, sessionId, 'converted', match.convertedName);
-    const data = await fs.readFile(filePath);
+    const convertedDir = resolveWithin(getSessionDir(sessionId), 'converted');
+    const filePath = resolveWithin(convertedDir, match.convertedName);
+    const handle = await fs.open(filePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const data = await handle.readFile().finally(() => handle.close());
     const inline = ['1', 'true'].includes(searchParams.get('inline') ?? '');
 
     return new NextResponse(new Uint8Array(data), {
       headers: {
-        'Content-Type': match.mimeType,
+        'Content-Type': getMimeType(match.format),
         'Content-Disposition': `${inline ? 'inline' : 'attachment'}; filename="${match.convertedName}"`,
         'Cache-Control': 'no-store',
+        'X-Content-Type-Options': 'nosniff',
       },
     });
   } catch {

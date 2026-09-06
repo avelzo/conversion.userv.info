@@ -90,8 +90,6 @@ export default function ConverterApp() {
       files.forEach((entry) => formData.append('files', entry.file));
       formData.append('format', format);
       formData.append('quality', String(quality));
-      if (sessionId) formData.append('sessionId', sessionId);
-
       await new Promise<void>((resolve, reject) => {
         const xhr = new XMLHttpRequest();
         xhr.open('POST', '/api/upload');

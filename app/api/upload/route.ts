@@ -8,170 +8,246 @@ import {
   getMimeType,
   purgeOldSessions,
   replaceExt,
+  resolveWithin,
   sanitizeFilename,
   type ConvertedFileRecord,
   type OutputFormat,
   writeManifest,
 } from '@/lib/files';
+import {
+  MAX_FILES_PER_REQUEST,
+  MAX_FILE_SIZE,
+  MAX_CONCURRENT_UPLOADS,
+  MAX_OUTPUT_FILE_SIZE,
+  MAX_REQUEST_SIZE,
+  MAX_TOTAL_OUTPUT_SIZE,
+  MAX_TOTAL_SIZE,
+  readLimitedFormData,
+  RequestTooLargeError,
+  validateHeic,
+} from '@/lib/upload-validation';
 
 export const runtime = 'nodejs';
 
+const SESSION_MAX_AGE_MS = 12 * 60 * 60 * 1000;
+let activeUploads = 0;
+
 function clampQuality(value: number) {
-  if (Number.isNaN(value)) return 85;
-  return Math.max(1, Math.min(100, value));
+  if (!Number.isFinite(value)) return 85;
+  return Math.max(1, Math.min(100, Math.round(value)));
+}
+
+function uniqueFilename(filename: string, outputFormat: OutputFormat, usedOutputNames: Set<string>) {
+  const parsed = path.parse(filename);
+  let candidate = filename;
+  let suffix = 2;
+
+  while (usedOutputNames.has(replaceExt(candidate, outputFormat).toLowerCase())) {
+    candidate = `${parsed.name}-${suffix}${parsed.ext}`;
+    suffix += 1;
+  }
+  usedOutputNames.add(replaceExt(candidate, outputFormat).toLowerCase());
+  return candidate;
 }
 
 async function convertHeic(buffer: Buffer, format: OutputFormat, quality: number) {
-  console.log(`convertHeic called with format ${format}, quality ${quality}`);
-  try {
-    if (format === 'jpg' || format === 'png') {
-      console.log('Converting directly to JPEG/PNG');
-      const converted = await convert({
-        buffer,
-        format: format === 'jpg' ? 'JPEG' : 'PNG',
-        quality: quality / 100,
-      });
-      console.log('Direct conversion done');
-      return Buffer.from(converted);
-    }
-
-    console.log('Converting to intermediate PNG');
-    const intermediatePng = await convert({
+  if (format === 'jpg' || format === 'png') {
+    const converted = await convert({
       buffer,
-      format: 'PNG',
-      quality: 1,
+      format: format === 'jpg' ? 'JPEG' : 'PNG',
+      quality: quality / 100,
     });
-    console.log('Intermediate PNG done, now to WebP');
-    const result = await sharp(Buffer.from(intermediatePng)).webp({ quality }).toBuffer();
-    console.log('WebP conversion done');
-    return result;
-  } catch (error) {
-    console.error('Error in convertHeic:', error);
-    throw error;
+    return Buffer.from(converted);
   }
+
+  const intermediatePng = await convert({ buffer, format: 'PNG', quality: 1 });
+  return sharp(Buffer.from(intermediatePng)).webp({ quality }).toBuffer();
 }
 
 export async function POST(request: Request) {
+  const declaredLength = Number(request.headers.get('content-length'));
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_REQUEST_SIZE) {
+    return NextResponse.json({ error: 'La requête dépasse la limite de 100 Mio.' }, { status: 413 });
+  }
+
+  if (activeUploads >= MAX_CONCURRENT_UPLOADS) {
+    return NextResponse.json({ error: 'Le serveur traite déjà plusieurs conversions. Réessaie dans un instant.' }, { status: 429 });
+  }
+  activeUploads += 1;
+  let released = false;
+  const releaseUploadSlot = () => {
+    if (!released) {
+      released = true;
+      activeUploads -= 1;
+    }
+  };
+  const earlyResponse = (response: NextResponse) => {
+    releaseUploadSlot();
+    return response;
+  };
+
+  let formData: FormData;
   try {
-    const formData = await request.formData();
-    const files = formData.getAll('files') as File[];
-    const format = (formData.get('format') as OutputFormat | null) ?? 'jpg';
-    const quality = clampQuality(Number(formData.get('quality') ?? 85));
-    const sessionId = (formData.get('sessionId') as string | null) ?? undefined;
-
-    if (!files.length) {
-      return NextResponse.json({ error: 'Aucun fichier reçu.' }, { status: 400 });
+    formData = await readLimitedFormData(request);
+  } catch (error) {
+    if (error instanceof RequestTooLargeError) {
+      return earlyResponse(NextResponse.json({ error: 'La requête dépasse la limite de 100 Mio.' }, { status: 413 }));
     }
+    return earlyResponse(NextResponse.json({ error: 'Corps multipart invalide.' }, { status: 400 }));
+  }
 
-    const validFormats: OutputFormat[] = ['jpg', 'png', 'webp'];
-    if (!validFormats.includes(format)) {
-      return NextResponse.json({ error: 'Format de sortie invalide.' }, { status: 400 });
-    }
+  const fileValues = formData.getAll('files');
+  if (!fileValues.length || fileValues.some((value) => !(value instanceof File))) {
+    return earlyResponse(NextResponse.json({ error: 'Aucun fichier valide reçu.' }, { status: 400 }));
+  }
+  const files = fileValues as File[];
 
-    await purgeOldSessions(12 * 60 * 60 * 1000);
-    const { sessionId: resolvedSessionId, originalDir, convertedDir } = await createSessionFolders(sessionId);
-    const convertedFiles: ConvertedFileRecord[] = [];
-    const errors: { filename: string; error: string }[] = [];
+  if (files.length > MAX_FILES_PER_REQUEST) {
+    return earlyResponse(NextResponse.json({ error: `Maximum ${MAX_FILES_PER_REQUEST} fichiers par conversion.` }, { status: 413 }));
+  }
 
-    const encoder = new TextEncoder();
+  const totalSize = files.reduce((sum, file) => sum + file.size, 0);
+  if (files.some((file) => file.size > MAX_FILE_SIZE)) {
+    return earlyResponse(NextResponse.json({ error: 'Chaque fichier est limité à 25 Mio.' }, { status: 413 }));
+  }
+  if (totalSize > MAX_TOTAL_SIZE) {
+    return earlyResponse(NextResponse.json({ error: 'La taille totale est limitée à 100 Mio.' }, { status: 413 }));
+  }
 
-    const stream = new ReadableStream({
-      async start(controller) {
-        console.log('Stream start called');
-        try {
-          const write = async (payload: object) => {
-            controller.enqueue(encoder.encode(`${JSON.stringify(payload)}\n`));
-          };
+  const rawFormat = formData.get('format');
+  const format = typeof rawFormat === 'string' ? rawFormat : 'jpg';
+  if (!['jpg', 'png', 'webp'].includes(format)) {
+    return earlyResponse(NextResponse.json({ error: 'Format de sortie invalide.' }, { status: 400 }));
+  }
+  const outputFormat = format as OutputFormat;
+  const quality = clampQuality(Number(formData.get('quality') ?? 85));
 
-          await write({ type: 'start', total: files.length });
-          console.log('Start written');
+  // Never use a client-controlled session ID in a filesystem path.
+  let session: Awaited<ReturnType<typeof createSessionFolders>>;
+  try {
+    await purgeOldSessions(SESSION_MAX_AGE_MS);
+    session = await createSessionFolders();
+  } catch {
+    return earlyResponse(NextResponse.json({ error: 'Stockage temporaire indisponible.' }, { status: 500 }));
+  }
+  const { sessionId, sessionDir, originalDir, convertedDir } = session;
+  const convertedFiles: ConvertedFileRecord[] = [];
+  const errors: { filename: string; error: string }[] = [];
+  const usedOutputNames = new Set<string>();
+  const encoder = new TextEncoder();
+  let cancelled = false;
+
+  const stream = new ReadableStream({
+    async start(controller) {
+      const write = (payload: object) => {
+        if (cancelled) return;
+        controller.enqueue(encoder.encode(`${JSON.stringify(payload)}\n`));
+      };
+
+      try {
+        write({ type: 'start', total: files.length });
+        let totalOutputSize = 0;
 
         for (let index = 0; index < files.length; index += 1) {
-          const file = files[index];
-          const originalName = sanitizeFilename(file.name || `image-${Date.now()}.heic`);
-          const isHeic = /\.(heic|heif)$/i.test(originalName) || ['image/heic', 'image/heif'].includes(file.type);
-
-          if (!isHeic) {
-            errors.push({ filename: originalName, error: 'Format non supporté. Utilise un fichier .heic ou .heif.' });
-            await write({ type: 'progress', index: index + 1, total: files.length, filename: originalName });
-            continue;
+          if (cancelled || request.signal.aborted) {
+            throw new Error('Upload cancelled');
           }
 
+          const file = files[index];
+          const displayName = sanitizeFilename(file.name || `image-${index + 1}.heic`);
+          const originalName = uniqueFilename(displayName, outputFormat, usedOutputNames);
+          let originalPath: string | undefined;
+          let convertedPath: string | undefined;
+
           try {
-            console.log(`Starting conversion for ${originalName}`);
-            const arrayBuffer = await file.arrayBuffer();
-            const inputBuffer = Buffer.from(arrayBuffer);
-            console.log(`Buffer size: ${inputBuffer.length}`);
-            const originalPath = path.join(originalDir, originalName);
-            await fs.writeFile(originalPath, inputBuffer);
-            console.log(`Original file written: ${originalPath}`);
+            if (!/\.(heic|heif)$/i.test(originalName)) {
+              throw new Error('Extension non supportée. Utilise un fichier .heic ou .heif.');
+            }
 
-            const convertedName = replaceExt(originalName, format);
-            const convertedPath = path.join(convertedDir, convertedName);
-            console.log(`Converting to ${format} with quality ${quality}`);
-            const outputBuffer = await convertHeic(inputBuffer, format, quality);
-            console.log(`Conversion done, output size: ${outputBuffer.length}`);
-            await fs.writeFile(convertedPath, outputBuffer);
-            console.log(`Converted file written: ${convertedPath}`);
+            const inputBuffer = Buffer.from(await file.arrayBuffer());
+            await validateHeic(inputBuffer);
 
+            originalPath = resolveWithin(originalDir, originalName);
+            await fs.writeFile(originalPath, inputBuffer, { flag: 'wx' });
+
+            const convertedName = replaceExt(originalName, outputFormat);
+            convertedPath = resolveWithin(convertedDir, convertedName);
+            const outputBuffer = await convertHeic(inputBuffer, outputFormat, quality);
+
+            if (outputBuffer.length > MAX_OUTPUT_FILE_SIZE) {
+              throw new Error('Le fichier converti dépasse la limite de 100 Mio.');
+            }
+            if (totalOutputSize + outputBuffer.length > MAX_TOTAL_OUTPUT_SIZE) {
+              throw new Error('La taille totale des conversions dépasse la limite de 250 Mio.');
+            }
+
+            await fs.writeFile(convertedPath, outputBuffer, { flag: 'wx' });
+            totalOutputSize += outputBuffer.length;
             convertedFiles.push({
               originalName,
               convertedName,
               originalPath,
               convertedPath,
-              mimeType: getMimeType(format),
-              format,
+              mimeType: getMimeType(outputFormat),
+              format: outputFormat,
               size: outputBuffer.length,
               createdAt: new Date().toISOString(),
             });
-            await write({ type: 'progress', index: index + 1, total: files.length, filename: originalName });
           } catch (error) {
-            console.error(`Error converting ${originalName}:`, error);
-            const message = error instanceof Error ? error.message : 'Conversion impossible';
-            errors.push({ filename: originalName, error: message });
-            await write({ type: 'progress', index: index + 1, total: files.length, filename: originalName });
+            await Promise.all([
+              originalPath ? fs.rm(originalPath, { force: true }) : Promise.resolve(),
+              convertedPath ? fs.rm(convertedPath, { force: true }) : Promise.resolve(),
+            ]);
+            errors.push({
+              filename: displayName,
+              error: error instanceof Error ? error.message : 'Conversion impossible.',
+            });
           }
+
+          write({ type: 'progress', index: index + 1, total: files.length, filename: displayName });
         }
 
-        await write({
+        await writeManifest(sessionId, {
+          sessionId,
+          createdAt: new Date().toISOString(),
+          format: outputFormat,
+          quality,
+          files: convertedFiles,
+        });
+
+        write({
           type: 'done',
-          sessionId: resolvedSessionId,
+          sessionId,
           files: convertedFiles.map((item) => ({
             originalName: item.originalName,
             convertedName: item.convertedName,
             size: item.size,
             mimeType: item.mimeType,
-            downloadUrl: `/api/download/${resolvedSessionId}?file=${encodeURIComponent(item.convertedName)}`,
+            downloadUrl: `/api/download/${sessionId}?file=${encodeURIComponent(item.convertedName)}`,
           })),
           errors,
         });
-
-        await writeManifest(resolvedSessionId, {
-          sessionId: resolvedSessionId,
-          createdAt: new Date().toISOString(),
-          format,
-          quality,
-          files: convertedFiles,
-        });
-
         controller.close();
-        } catch (error) {
-          console.error('Error in stream start:', error);
-          controller.error(error);
+      } catch {
+        await fs.rm(sessionDir, { recursive: true, force: true });
+        if (!cancelled) {
+          write({ type: 'error', error: 'La conversion a échoué.' });
+          controller.close();
         }
-      },
-      cancel() {
-        /* no-op */
-      },
-    });
+      } finally {
+        releaseUploadSlot();
+      }
+    },
+    cancel() {
+      cancelled = true;
+    },
+  });
 
-    return new Response(stream, {
-      headers: {
-        'Content-Type': 'application/x-ndjson',
-      },
-    });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'Erreur serveur.';
-    return NextResponse.json({ error: message }, { status: 500 });
-  }
+  return new Response(stream, {
+    headers: {
+      'Content-Type': 'application/x-ndjson; charset=utf-8',
+      'Cache-Control': 'no-store',
+      'X-Content-Type-Options': 'nosniff',
+    },
+  });
 }
