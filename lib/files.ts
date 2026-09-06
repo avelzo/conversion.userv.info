@@ -3,7 +3,11 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 
 export const UPLOADS_ROOT = '/var/tmp/conversion.userv.info';
+export const STORAGE_QUOTA_BYTES = 2 * 1024 * 1024 * 1024;
+export const MIN_FREE_STORAGE_BYTES = 1024 * 1024 * 1024;
 const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+export class StorageCapacityError extends Error {}
 
 export type OutputFormat = 'jpg' | 'png' | 'webp';
 
@@ -121,6 +125,73 @@ export async function purgeOldSessions(maxAgeMs: number) {
   }
 
   return purgedSessions;
+}
+
+async function getDirectorySize(dirPath: string): Promise<number> {
+  const entries = await fs.readdir(dirPath, { withFileTypes: true });
+  let size = 0;
+
+  for (const entry of entries) {
+    const entryPath = path.join(dirPath, entry.name);
+    if (entry.isDirectory()) {
+      size += await getDirectorySize(entryPath);
+    } else if (entry.isFile()) {
+      size += (await fs.stat(entryPath)).size;
+    }
+  }
+
+  return size;
+}
+
+export async function ensureStorageCapacity(reservedBytes = 0) {
+  if (!Number.isSafeInteger(reservedBytes) || reservedBytes < 0) {
+    throw new StorageCapacityError('Invalid storage reservation');
+  }
+
+  await ensureDir(UPLOADS_ROOT);
+  const entries = await fs.readdir(UPLOADS_ROOT, { withFileTypes: true });
+  const sessions: { path: string; size: number; updatedAt: number }[] = [];
+
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !isValidSessionId(entry.name)) continue;
+    const sessionPath = getSessionDir(entry.name);
+    try {
+      const stats = await fs.stat(sessionPath);
+      sessions.push({
+        path: sessionPath,
+        size: await getDirectorySize(sessionPath),
+        updatedAt: Math.max(stats.mtimeMs, stats.ctimeMs),
+      });
+    } catch {
+      // Ignore sessions concurrently removed by another cleanup or request.
+    }
+  }
+
+  sessions.sort((left, right) => left.updatedAt - right.updatedAt);
+  let storedBytes = sessions.reduce((total, session) => total + session.size, 0);
+  const fileSystem = await fs.statfs(UPLOADS_ROOT);
+  let freeBytes = Number(fileSystem.bavail) * Number(fileSystem.bsize);
+  let purgedSessions = 0;
+
+  for (const session of sessions) {
+    const quotaExceeded = storedBytes + reservedBytes > STORAGE_QUOTA_BYTES;
+    const freeSpaceLow = freeBytes < reservedBytes + MIN_FREE_STORAGE_BYTES;
+    if (!quotaExceeded && !freeSpaceLow) break;
+
+    await fs.rm(session.path, { recursive: true, force: true });
+    storedBytes -= session.size;
+    freeBytes += session.size;
+    purgedSessions += 1;
+  }
+
+  if (
+    storedBytes + reservedBytes > STORAGE_QUOTA_BYTES ||
+    freeBytes < reservedBytes + MIN_FREE_STORAGE_BYTES
+  ) {
+    throw new StorageCapacityError('Insufficient temporary storage capacity');
+  }
+
+  return { purgedSessions, storedBytes, freeBytes };
 }
 
 export async function readManifest(sessionId: string): Promise<SessionManifest> {

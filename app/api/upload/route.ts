@@ -5,11 +5,13 @@ import convert from 'heic-convert';
 import sharp from 'sharp';
 import {
   createSessionFolders,
+  ensureStorageCapacity,
   getMimeType,
   purgeOldSessions,
   replaceExt,
   resolveWithin,
   sanitizeFilename,
+  StorageCapacityError,
   type ConvertedFileRecord,
   type OutputFormat,
   writeManifest,
@@ -126,8 +128,12 @@ export async function POST(request: Request) {
   let session: Awaited<ReturnType<typeof createSessionFolders>>;
   try {
     await purgeOldSessions(SESSION_MAX_AGE_MS);
+    await ensureStorageCapacity(totalSize + MAX_TOTAL_OUTPUT_SIZE);
     session = await createSessionFolders();
-  } catch {
+  } catch (error) {
+    if (error instanceof StorageCapacityError) {
+      return earlyResponse(NextResponse.json({ error: 'Quota de stockage temporaire atteint.' }, { status: 507 }));
+    }
     return earlyResponse(NextResponse.json({ error: 'Stockage temporaire indisponible.' }, { status: 500 }));
   }
   const { sessionId, sessionDir, originalDir, convertedDir } = session;
