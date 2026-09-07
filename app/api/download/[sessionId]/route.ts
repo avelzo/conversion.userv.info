@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import fs from 'node:fs/promises';
 import { constants } from 'node:fs';
+import { Readable } from 'node:stream';
 import { getMimeType, getSessionDir, isValidSessionId, readManifest, resolveWithin } from '@/lib/files';
 
 export const runtime = 'nodejs';
@@ -32,12 +33,18 @@ export async function GET(
     const convertedDir = resolveWithin(getSessionDir(sessionId), 'converted');
     const filePath = resolveWithin(convertedDir, match.convertedName);
     const handle = await fs.open(filePath, constants.O_RDONLY | constants.O_NOFOLLOW);
-    const data = await handle.readFile().finally(() => handle.close());
+    const stats = await handle.stat();
+    if (!stats.isFile()) {
+      await handle.close();
+      return NextResponse.json({ error: 'Fichier introuvable.' }, { status: 404 });
+    }
+    const body = Readable.toWeb(handle.createReadStream({ autoClose: true })) as ReadableStream;
     const inline = ['1', 'true'].includes(searchParams.get('inline') ?? '');
 
-    return new NextResponse(new Uint8Array(data), {
+    return new NextResponse(body, {
       headers: {
         'Content-Type': getMimeType(match.format),
+        'Content-Length': String(stats.size),
         'Content-Disposition': `${inline ? 'inline' : 'attachment'}; filename="${match.convertedName}"`,
         'Cache-Control': 'no-store',
         'X-Content-Type-Options': 'nosniff',

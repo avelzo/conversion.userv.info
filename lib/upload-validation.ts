@@ -1,3 +1,4 @@
+import fs from 'node:fs/promises';
 import sharp, { type Metadata } from 'sharp';
 
 export const MAX_FILES_PER_REQUEST = 20;
@@ -8,38 +9,6 @@ export const MAX_REQUEST_SIZE = MAX_TOTAL_SIZE + 1024 * 1024;
 export const MAX_OUTPUT_FILE_SIZE = 100 * 1024 * 1024;
 export const MAX_TOTAL_OUTPUT_SIZE = 250 * 1024 * 1024;
 export const MAX_CONCURRENT_UPLOADS = 2;
-
-export class RequestTooLargeError extends Error {}
-
-export async function readLimitedFormData(request: Request) {
-  const contentType = request.headers.get('content-type') ?? '';
-  if (!contentType.toLowerCase().startsWith('multipart/form-data;') || !request.body) {
-    throw new Error('Invalid multipart body');
-  }
-
-  const reader = request.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let receivedSize = 0;
-
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      receivedSize += value.byteLength;
-      if (receivedSize > MAX_REQUEST_SIZE) {
-        throw new RequestTooLargeError('Request body too large');
-      }
-      chunks.push(value);
-    }
-  } catch (error) {
-    await reader.cancel().catch(() => undefined);
-    throw error;
-  }
-
-  const body = new Uint8Array(Buffer.concat(chunks, receivedSize));
-  return new Response(body, { headers: { 'Content-Type': contentType } }).formData();
-}
 
 const HEIC_BRANDS = new Set([
   'heic', 'heix', 'hevc', 'hevx',
@@ -52,11 +21,12 @@ export function hasHeicSignature(buffer: Buffer) {
   }
 
   const boxSize = buffer.readUInt32BE(0);
-  if (boxSize < 16 || boxSize > buffer.length) {
+  if (boxSize < 16) {
     return false;
   }
 
-  for (let offset = 8; offset + 4 <= boxSize; offset += 4) {
+  const availableBoxSize = Math.min(boxSize, buffer.length);
+  for (let offset = 8; offset + 4 <= availableBoxSize; offset += 4) {
     if (HEIC_BRANDS.has(buffer.toString('ascii', offset, offset + 4))) {
       return true;
     }
@@ -65,14 +35,14 @@ export function hasHeicSignature(buffer: Buffer) {
   return false;
 }
 
-export async function validateHeic(buffer: Buffer) {
-  if (!hasHeicSignature(buffer)) {
+async function validateHeicInput(input: Buffer | string, signature: Buffer) {
+  if (!hasHeicSignature(signature)) {
     throw new Error('Le contenu du fichier n’est pas une image HEIC/HEIF valide.');
   }
 
   let metadata: Metadata;
   try {
-    metadata = await sharp(buffer, { limitInputPixels: MAX_IMAGE_PIXELS }).metadata();
+    metadata = await sharp(input, { limitInputPixels: MAX_IMAGE_PIXELS }).metadata();
   } catch {
     throw new Error('Le fichier HEIC/HEIF est invalide ou dépasse la taille d’image autorisée.');
   }
@@ -85,5 +55,20 @@ export async function validateHeic(buffer: Buffer) {
 
   if (width * height > MAX_IMAGE_PIXELS) {
     throw new Error('L’image dépasse la limite de 40 mégapixels.');
+  }
+}
+
+export async function validateHeic(buffer: Buffer) {
+  await validateHeicInput(buffer, buffer);
+}
+
+export async function validateHeicFile(filePath: string) {
+  const handle = await fs.open(filePath, 'r');
+  try {
+    const signature = Buffer.alloc(4096);
+    const { bytesRead } = await handle.read(signature, 0, signature.length, 0);
+    await validateHeicInput(filePath, signature.subarray(0, bytesRead));
+  } finally {
+    await handle.close();
   }
 }

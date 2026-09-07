@@ -13,4 +13,3 @@ yarn-error.log*
 .env
 uploads/
 !uploads/.gitkeep
-package-lock.json

@@ -14,8 +14,6 @@ export type OutputFormat = 'jpg' | 'png' | 'webp';
 export type ConvertedFileRecord = {
   originalName: string;
   convertedName: string;
-  originalPath: string;
-  convertedPath: string;
   mimeType: string;
   format: OutputFormat;
   size: number;
@@ -80,7 +78,11 @@ export function sanitizeFilename(name: string) {
     .replace(/-+/g, '-')
     .replace(/^[.-]+|[.-]+$/g, '');
 
-  return sanitized || 'image.heic';
+  if (!sanitized) return 'image.heic';
+  if (sanitized.length <= 180) return sanitized;
+
+  const parsed = path.parse(sanitized);
+  return `${parsed.name.slice(0, Math.max(1, 180 - parsed.ext.length))}${parsed.ext}`;
 }
 
 export function replaceExt(filename: string, ext: string) {

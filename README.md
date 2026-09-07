@@ -22,6 +22,7 @@ Application Next.js simple pour convertir des images **HEIC/HEIF** vers **JPG**,
 - Une conversion produite est limitée à 100 Mio, et l'ensemble des sorties d'une requête à 250 Mio.
 - Au plus deux requêtes de conversion sont traitées simultanément par processus serveur.
 - Le stockage temporaire est plafonné à 2 Gio, avec au moins 1 Gio d'espace libre conservé ; les sessions les plus anciennes sont supprimées en priorité.
+- Les uploads et téléchargements sont traités en streaming ; Sharp convertit depuis le fichier temporaire avec un délai maximal de 60 secondes.
 - Les fichiers partiels sont supprimés en cas d'échec et les sessions âgées de plus de 12 heures sont purgées lors d'un nouvel upload et par une tâche cron horaire.
 
 ## Installation

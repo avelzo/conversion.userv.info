@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import {
@@ -8,7 +10,8 @@ import {
   sanitizeFilename,
   UPLOADS_ROOT,
 } from '../lib/files.ts';
-import { hasHeicSignature, readLimitedFormData } from '../lib/upload-validation.ts';
+import { streamMultipartUpload } from '../lib/multipart-upload.ts';
+import { hasHeicSignature } from '../lib/upload-validation.ts';
 
 test('only server-shaped UUID v4 session IDs are accepted', () => {
   const valid = 'b6945841-658e-452a-bf64-f8031052f9e7';
@@ -47,14 +50,20 @@ test('HEIC detection checks the ISO BMFF brands instead of the extension or MIME
   assert.equal(hasHeicSignature(avifHeader), false);
 });
 
-test('multipart parsing works without trusting a declared content length', async () => {
+test('multipart files are streamed to disk without trusting a declared content length', async () => {
+  const temporaryDir = await fs.mkdtemp(path.join(os.tmpdir(), 'conversion-multipart-'));
   const input = new FormData();
   input.set('format', 'jpg');
   input.set('files', new File([Buffer.from('small body')], 'fake.heic'));
   const request = new Request('http://localhost/api/upload', { method: 'POST', body: input });
   request.headers.delete('content-length');
 
-  const parsed = await readLimitedFormData(request);
-  assert.equal(parsed.get('format'), 'jpg');
-  assert.equal((parsed.get('files') as File).name, 'fake.heic');
+  try {
+    const parsed = await streamMultipartUpload(request, temporaryDir);
+    assert.equal(parsed.fields.get('format'), 'jpg');
+    assert.equal(parsed.uploads[0].originalName, 'fake.heic');
+    assert.equal(await fs.readFile(parsed.uploads[0].originalPath, 'utf8'), 'small body');
+  } finally {
+    await fs.rm(temporaryDir, { recursive: true, force: true });
+  }
 });
