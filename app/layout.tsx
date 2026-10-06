@@ -1,6 +1,6 @@
 import './globals.css';
 import type { Metadata } from 'next';
-import Script from 'next/script';
+import AnalyticsConsent from '@/components/AnalyticsConsent';
 
 export const metadata: Metadata = {
   title: 'Convertisseur HEIC local',
@@ -13,22 +13,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="fr">
       <body>
-        {gaId ? (
-          <>
-            <Script
-              src={`https://www.googletagmanager.com/gtag/js?id=${gaId}`}
-              strategy="afterInteractive"
-            />
-            <Script id="google-analytics" strategy="afterInteractive">
-              {`
-                window.dataLayer = window.dataLayer || [];
-                function gtag(){dataLayer.push(arguments);}
-                gtag('js', new Date());
-                gtag('config', '${gaId}');
-              `}
-            </Script>
-          </>
-        ) : null}
+        <AnalyticsConsent gaId={gaId} />
         {children}
       </body>
     </html>
