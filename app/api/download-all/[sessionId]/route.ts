@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import fs from 'node:fs';
-import archiver from 'archiver';
+import { ZipArchive } from 'archiver';
 import { getSessionDir, isValidSessionId, readManifest, resolveWithin } from '@/lib/files';
 
 export const runtime = 'nodejs';
@@ -20,7 +20,7 @@ export async function GET(
 
     const stream = new ReadableStream({
       start(controller) {
-        const archive = archiver('zip', { zlib: { level: 9 } });
+        const archive = new ZipArchive({ zlib: { level: 9 } });
 
         archive.on('data', (chunk) => controller.enqueue(chunk));
         archive.on('end', () => controller.close());
